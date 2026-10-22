@@ -28,6 +28,7 @@ from .vector_store import (
 logger = logging.getLogger(__name__)
 
 RELATION_WEIGHT = 1.5  # an edge is more specific than a node
+MAX_GRAPH_PASSAGES = 2  # full text of the source passages of the best-matching edges, given to the LLM
 HOP_WEIGHT = 0.5  # edges reached by following a matched node, not matched directly
 
 
@@ -42,6 +43,8 @@ class GraphResult:
     neighbors: list = field(default_factory=list)  # one-hop edges of the matched nodes: [{"source", "target", "keywords"}]
     neighbor_count: int = 0  # all one-hop edges used for scoring (neighbors only lists the most specific)
     source_chunks: list = field(default_factory=list)  # parents the graph points to: [{"id", "title", "article", "score"}]
+    passage_ids: list = field(default_factory=list)  # source parents of the best-matching edges, shown verbatim to the LLM
+    passages: list = field(default_factory=list)  # filled by Retrieval: [{"id", "title", "article"}] actually added to the prompt
     added_parents: list = field(default_factory=list)  # filled by Retrieval: [{"id", "title", "article", "used"}]
 
 
@@ -132,8 +135,22 @@ class GraphRetriever:
         )
         logger.info(f"Graph retrieval: keywords low={low_level!r} high={high_level!r} -> "
                     f"{len(entity_hits)} nodes, {len(relation_hits)} edges, {len(ranked)} parents")
+        # Verbatim source passages: where the best-matching relations were stated (LightRAG gives the
+        # LLM the source chunks next to the graph facts, so citations can be checked against the law text)
+        passage_ids = []
+        for h in relation_hits:
+            r = relations.get(h.payload["key"])
+            if not r:
+                continue
+            pid = (r.get("description_sources") or r["parent_ids"])[0]
+            if pid not in passage_ids:
+                passage_ids.append(pid)
+            if len(passage_ids) == MAX_GRAPH_PASSAGES:
+                break
+
         return GraphResult(
             parent_ids=ranked,
+            passage_ids=passage_ids,
             context=self._format_context(matched_entities, matched_relations),
             keywords={"low_level": keywords.get("low_level") or [], "high_level": keywords.get("high_level") or []},
             entities=matched_entities,
@@ -170,27 +187,48 @@ class GraphRetriever:
         return chunks
 
     def _describe(self, entity_matches, relation_matches):
-        """Matched nodes / edges as plain dicts (display names, short descriptions, similarity scores)."""
+        """Matched nodes / edges as plain dicts: display names, descriptions labelled with the document
+        they were written from (descriptions often say only "Theo Điều 55"), similarity scores."""
         endpoint_keys = {r["source"] for r, _ in relation_matches} | {r["target"] for r, _ in relation_matches}
         names = {d["_id"]: d["name"] for d in self.db["graph_entities"].find({"_id": {"$in": list(endpoint_keys)}}, {"name": 1})}
+
+        def sourced(doc, n):
+            texts = doc["descriptions"][:n]
+            sources = (doc.get("description_sources") or [])[:n]
+            return [{"text": t, "parent_id": sources[i] if i < len(sources) else None} for i, t in enumerate(texts)]
+
+        entity_descs = [sourced(e, 2) for e, _ in entity_matches[:self.context_entities]]
+        relation_descs = [sourced(r, 1) for r, _ in relation_matches[:self.context_relations]]
+        parent_ids = {d["parent_id"] for ds in entity_descs + relation_descs for d in ds if d["parent_id"]}
+        titles = {d["id"]: d["metadata"].get("title", "") for d in
+                  self.db["documents"].find({"id": {"$in": list(parent_ids)}}, {"id": 1, "metadata.title": 1})}
+        for ds in entity_descs + relation_descs:
+            for d in ds:
+                d["source"] = titles.get(d["parent_id"], "")
+
+        def labelled(ds, limit):
+            return " ".join(f"{d['text']} [{d['source']}]" if d["source"] else d["text"] for d in ds)[:limit]
+
         entities = [
             {
                 "name": e["name"],
                 "type": e.get("type") or "khái niệm",
-                "description": " ".join(e["descriptions"][:2])[:400],
+                "descriptions": ds,
+                "description": labelled(ds, 500),
                 "score": round(score, 3),
             }
-            for e, score in entity_matches[:self.context_entities]
+            for (e, score), ds in zip(entity_matches[:self.context_entities], entity_descs)
         ]
         relations = [
             {
                 "source": names.get(r["source"], r["source"]),
                 "target": names.get(r["target"], r["target"]),
                 "keywords": _clean_keywords(r["keywords"]),
-                "description": (r["descriptions"][0] if r["descriptions"] else "")[:300],
+                "descriptions": ds,
+                "description": labelled(ds, 400),
                 "score": round(score, 3),
             }
-            for r, score in relation_matches[:self.context_relations]
+            for (r, score), ds in zip(relation_matches[:self.context_relations], relation_descs)
         ]
         return entities, relations
 

@@ -35,7 +35,8 @@ def bot_answer_message(history, question, keywords=None, use_graph=False):
 
     if len(top_docs) > 0:
         logger.info(f"Only call RAG (graph mode: {use_graph}, graph context: {len(graph.context.splitlines())} lines)")
-        assistant_answer = assistant.generation.generate(question, top_docs, graph_context=graph.context)
+        assistant_answer = assistant.generation.generate(question, top_docs, graph_context=graph.context,
+                                                         graph_passages=getattr(graph, "passage_docs", None))
         return assistant_answer, graph
 
     logger.warning(f"call Tavily search")

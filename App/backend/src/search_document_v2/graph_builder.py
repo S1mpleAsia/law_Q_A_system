@@ -244,13 +244,14 @@ def merge_graph():
         if not key:
             return None
         node = nodes.setdefault(key, {
-            "names": Counter(), "types": Counter(), "descriptions": [], "parent_ids": set(),
+            "names": Counter(), "types": Counter(), "descriptions": [], "description_sources": [], "parent_ids": set(),
         })
         node["names"][name] += 1
         if entity_type:
             node["types"][entity_type] += 1
         if description and description not in node["descriptions"]:
             node["descriptions"].append(description)
+            node["description_sources"].append(parent_id)  # aligned with descriptions: where each was written
         node["parent_ids"].add(parent_id)
         return key
 
@@ -267,13 +268,14 @@ def merge_graph():
                 continue
             edge = edges.setdefault(f"{source}|{target}", {
                 "source": source, "target": target,
-                "keywords": Counter(), "descriptions": [], "parent_ids": set(),
+                "keywords": Counter(), "descriptions": [], "description_sources": [], "parent_ids": set(),
             })
             for keyword in re.split(r"[,;]", relation.get("keywords", "")):
                 if keyword.strip():
                     edge["keywords"][keyword.strip().lower()] += 1
             if relation["description"] not in edge["descriptions"]:
                 edge["descriptions"].append(relation["description"])
+                edge["description_sources"].append(parent_id)
             edge["parent_ids"].add(parent_id)
 
     degree = Counter()
@@ -287,6 +289,8 @@ def merge_graph():
             "name": node["names"].most_common(1)[0][0],
             "type": node["types"].most_common(1)[0][0] if node["types"] else None,
             "descriptions": node["descriptions"][:MAX_DESCRIPTIONS],
+            # Parent each description came from, so an answer can cite the document, not just "Điều 55"
+            "description_sources": node["description_sources"][:MAX_DESCRIPTIONS],
             "parent_ids": sorted(node["parent_ids"]),
             "degree": degree[key],
         }
@@ -299,6 +303,7 @@ def merge_graph():
             "target": edge["target"],
             "keywords": [keyword for keyword, _ in edge["keywords"].most_common(5)],
             "descriptions": edge["descriptions"][:MAX_DESCRIPTIONS],
+            "description_sources": edge["description_sources"][:MAX_DESCRIPTIONS],
             "parent_ids": sorted(edge["parent_ids"]),
         }
         for key, edge in edges.items()

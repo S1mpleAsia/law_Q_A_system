@@ -173,6 +173,14 @@ def _graph_dot(graph):
     return "\n".join(header + body + lines + ["}"])
 
 
+def _sourced_text(item):
+    """Descriptions of a concept / relation, each followed by the document it was extracted from."""
+    descriptions = item.get("descriptions")
+    if not descriptions:  # answers saved before descriptions carried their source
+        return item.get("description", "")
+    return "  \n".join(f"{d['text']} — _{d['source']}_" if d.get("source") else d["text"] for d in descriptions)
+
+
 def render_graph(graph):
     """How LightRAG answered this question, step by step: keywords, local and global retrieval
     on the knowledge graph, neighbour expansion, source chunks and the context given to the LLM."""
@@ -206,12 +214,12 @@ def render_graph(graph):
         with tab_local:
             st.caption("Khái niệm có mô tả gần nhất với từ khoá low-level (độ tương đồng cosine).")
             for e in entities:
-                st.markdown(f"`{e['score']:.2f}` **{e['name']}** · _{e['type']}_  \n{e['description']}")
+                st.markdown(f"`{e['score']:.2f}` **{e['name']}** · _{e['type']}_  \n{_sourced_text(e)}")
         with tab_global:
             st.caption("Quan hệ có mô tả gần nhất với từ khoá high-level (độ tương đồng cosine).")
             for r in relations:
                 st.markdown(f"`{r['score']:.2f}` **{r['source']}** → **{r['target']}** · "
-                            f"_{', '.join(r['keywords'])}_  \n{r['description']}")
+                            f"_{', '.join(r['keywords'])}_  \n{_sourced_text(r)}")
         with tab_hop:
             st.caption(f"Từ các khái niệm ở bước ③, đi theo cạnh sang khái niệm kề bên: "
                        f"{graph.get('neighbor_count', len(neighbors))} quan hệ. Dưới đây là {len(neighbors)} quan hệ cụ thể nhất.")
@@ -224,7 +232,12 @@ def render_graph(graph):
             for c in chunks:
                 st.markdown(f"`{c['score']:.2f}` **{c['title']}** — {c['article']}")
         with tab_context:
-            st.caption("Phần graph được ghép vào prompt, cạnh các điều luật đã tìm được.")
+            passages = graph.get("passages") or []
+            st.caption("Phần graph được ghép vào prompt, cạnh các điều luật đã tìm được. "
+                       "Mỗi dòng ghi văn bản nguồn trong [ngoặc vuông].")
+            if passages:
+                st.markdown("**Nguyên văn đoạn luật nguồn của các quan hệ khớp nhất** (thêm vào prompt):  \n"
+                            + "  \n".join(f"• **{p['title']}** — {p['article']}" for p in passages))
             st.code(graph.get("context") or "(trống)", language=None, wrap_lines=True)
 
 if (

@@ -134,6 +134,16 @@ class Retrieval(metaclass=Singleton):
             }
             for pid in graph_ids if pid in parent_docs
         ]
+
+        # Verbatim source passages of the best-matching graph relations, unless already among the law texts
+        missing = [pid for pid in graph_result.passage_ids if pid not in seen_parents]
+        if missing:
+            parent_docs.update(self.retriever.docstore.mget([pid for pid in missing if pid not in parent_docs]))
+        graph_result.passage_docs = [parent_docs[pid] for pid in missing if pid in parent_docs]
+        graph_result.passages = [
+            {"id": pid, "title": parent_docs[pid].metadata.get("title", ""), "article": _article_label(parent_docs[pid].page_content)}
+            for pid in missing if pid in parent_docs
+        ]
         return top_k_docs, graph_result
 
 
@@ -201,20 +211,26 @@ class Generation:
 
         return result, explanation
 
-    def generate(self, question, docs: Document, history_summary=None, graph_context=""):
+    def generate(self, question, docs: Document, history_summary=None, graph_context="", graph_passages=None):
+        # Law texts, then (graph mode) the verbatim source passages of the graph relations used below
+        all_docs = list(docs) + list(graph_passages or [])
         context = [
             f"- doc {i}: + info:{doc.metadata} \n + content:{doc.page_content[:MAX_DOC_CHARS]}"
-            for i, doc in enumerate(docs, start=1)
+            for i, doc in enumerate(all_docs, start=1)
         ]
         context = "\n".join(context)
 
-        # Knowledge-graph facts link concepts across articles / documents (LightRAG-style context);
-        # the law texts stay the source to cite
+        # Knowledge-graph facts link concepts across articles / documents (LightRAG-style context).
+        # Each line ends with [the document it was extracted from]; the law texts above stay the source to cite
         if graph_context:
             context += (
-                "\n\nRelated legal concepts and relations, extracted from the same legal texts "
-                "(use them to connect provisions across articles and documents; when you rely on one, "
-                "cite the article it mentions):\n" + graph_context
+                "\n\nRelated legal concepts and relations from a knowledge graph built from the same legal texts. "
+                "Each line ends with the document it comes from in [brackets]:\n" + graph_context
+                + "\n\nRules for these lines: they are short summaries that help you connect provisions across "
+                "articles and documents. When you cite, always name the document AND the article, taking the "
+                "document from the [bracket] (a line saying only 'Theo Điều 55' refers to Điều 55 of that document). "
+                "Prefer quoting provisions from the full legal texts above; do not guess clause or article numbers "
+                "that appear in neither the texts nor the lines."
             )
 
         messages = [
@@ -281,7 +297,8 @@ class Assistant(metaclass=Singleton):
             return explanation
 
         docs, graph = self.retrieval.retrieve(question, use_graph=use_graph)
-        answer = self.generation.generate(question, docs, graph_context=graph.context)
+        answer = self.generation.generate(question, docs, graph_context=graph.context,
+                                          graph_passages=getattr(graph, "passage_docs", None))
 
         return answer
     

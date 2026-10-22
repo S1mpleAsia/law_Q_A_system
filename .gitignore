@@ -183,3 +183,5 @@ mongo_data
 pretrained
 .vscode
 .streamlit
+# macOS
+.DS_Store
